@@ -8,6 +8,26 @@ Her fonksiyonun pass kısmını doldur. Testleri çalıştır, hepsi geçene kad
 iterate et: `python watch.py` veya `pytest tests/test_question.py -v`
 """
 
+import os
+import ssl
+import urllib.request
+import zipfile
+
+import numpy as np
+import pandas as pd
+import requests
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix,
+)
+
+UCI_URL = "https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip"
+
 
 # 1. UCI SMS Spam Collection veri setini indir (cache'li)
 def fetch_sms_data(cache_dir='data'):
@@ -43,7 +63,31 @@ def fetch_sms_data(cache_dir='data'):
         with urllib.request.urlopen(URL, context=ctx, timeout=60) as resp: ...
     URL: https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip
     """
-    pass
+    os.makedirs(cache_dir, exist_ok=True)
+    data_path = os.path.join(cache_dir, 'SMSSpamCollection')
+
+    if os.path.exists(data_path):
+        return data_path
+
+    zip_path = os.path.join(cache_dir, 'sms+spam+collection.zip')
+    if not os.path.exists(zip_path):
+        try:
+            r = requests.get(UCI_URL, timeout=60)
+            r.raise_for_status()
+            with open(zip_path, 'wb') as f:
+                f.write(r.content)
+        except requests.exceptions.SSLError:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(UCI_URL, context=ctx, timeout=60) as resp:
+                with open(zip_path, 'wb') as f:
+                    f.write(resp.read())
+
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        z.extractall(cache_dir)
+
+    return data_path
 
 
 # 2. TSV'yi DataFrame olarak yükle
@@ -62,7 +106,7 @@ def load_sms_data(path):
     - sep='\\t' → tab ayırıcı
     - names=[...] → dosyada başlık olmadığı için sütun adlarını biz veriyoruz
     """
-    pass
+    return pd.read_csv(path, sep="\t", names=["label", "message"])
 
 
 # 3. Veriyi keşfet — label dağılımı
@@ -82,7 +126,16 @@ def explore_data(df):
     - df['label'].value_counts() → 'ham' ve 'spam' sayıları
     - total = len(df)
     """
-    pass
+    
+    counts = df["label"].value_counts()
+    total = len(df)
+
+    return {
+        "total": total,
+        "ham_count": counts["ham"],
+        "spam_count": counts["spam"],
+        "spam_rate": counts["spam"] / total
+    }
 
 
 # 4. Label'ları encode et (spam/ham → 1/0)
@@ -101,7 +154,11 @@ def encode_labels(df):
     - out = df.copy()
     - out['target'] = out['label'].map({'spam': 1, 'ham': 0}).astype(int)
     """
-    pass
+    
+    df_copy = df.copy()
+    df_copy["target"] = df_copy["label"].map({"ham": 0, "spam": 1})
+    
+    return df_copy
 
 
 # 5. Train/test split (stratified)
@@ -119,7 +176,7 @@ def split_data(X, y):
 
     İpucu: from sklearn.model_selection import train_test_split
     """
-    pass
+    return train_test_split(X, y, random_state=42, stratify=y, test_size=0.2)
 
 
 # 6. CountVectorizer + MultinomialNB pipeline kur
@@ -143,7 +200,10 @@ def build_vectorizer_pipeline():
     - from sklearn.pipeline import Pipeline
     - Pipeline ham string listesini alır, CountVectorizer otomatik vektörize eder.
     """
-    pass
+    return Pipeline([
+        ("cv", CountVectorizer(stop_words="english")),
+        ("nb", MultinomialNB())
+    ])
 
 
 # 7. Modeli eğit
@@ -161,7 +221,7 @@ def train_model(pipe, X_train, y_train):
 
     İpucu: pipe.fit(X_train, y_train); return pipe
     """
-    pass
+    return pipe.fit(X_train, y_train)
 
 
 # 8. Modeli değerlendir
@@ -187,7 +247,15 @@ def evaluate_model(pipe, X_test, y_test):
       f1_score, confusion_matrix
     - precision/recall/f1'de zero_division=0 kullan
     """
-    pass
+    y_pred = pipe.predict(X_test)
+    
+    return {
+        "accuracy": accuracy_score(y_test, y_pred),
+        "precision": precision_score(y_test, y_pred),
+        "recall": recall_score(y_test, y_pred),
+        "f1": f1_score(y_test, y_pred),
+        "confusion_matrix": confusion_matrix(y_test, y_pred)
+    }
 
 
 # 9. Tek bir mesaj için tahmin yap
@@ -211,7 +279,14 @@ def predict_message(pipe, text):
     - proba = pipe.predict_proba([text])[0, 1]  # pozitif (spam) sınıf olasılığı
     - pred = int(pipe.predict([text])[0])
     """
-    pass
+    pred = pipe.predict([text])[0]
+    proba = pipe.predict_proba([text])[0, 1]
+    
+    return {
+        "prediction": pred,
+        "label": "spam" if pred == 1 else "ham",
+        "spam_probability": proba
+    }
 
 
 # 10. En "spam" kelimeler
@@ -238,7 +313,16 @@ def top_spam_words(pipe, n=10):
     - top_idx = np.argsort(diff)[::-1][:n]  # büyükten küçüğe ilk n
     - [feature_names[i] for i in top_idx]
     """
-    pass
+    
+    cv = pipe.named_steps["cv"]
+    nb = pipe.named_steps["nb"]
+    
+    feature_names = cv.get_feature_names_out()
+    
+    diff = nb.feature_log_prob_[1] - nb.feature_log_prob_[0]
+    top_idx = np.argsort(diff)[::-1][:n]
+
+    return [feature_names[i] for i in top_idx]
 
 
 # 11. En "ham" kelimeler
@@ -257,7 +341,16 @@ def top_ham_words(pipe, n=10):
     - diff = nb.feature_log_prob_[0] - nb.feature_log_prob_[1]  # ham - spam
     - top_idx = np.argsort(diff)[::-1][:n]
     """
-    pass
+    
+    cv = pipe.named_steps["cv"]
+    nb = pipe.named_steps["nb"]
+    
+    feature_names = cv.get_feature_names_out()
+    
+    diff = nb.feature_log_prob_[0] - nb.feature_log_prob_[1]
+    top_idx = np.argsort(diff)[::-1][:n]
+    
+    return [feature_names[i] for i in top_idx]
 
 
 # 12. Stopwords var/yok karşılaştırması
@@ -278,7 +371,21 @@ def compare_with_without_stopwords(X_train, X_test, y_train, y_test):
 
     İpucu: İki ayrı Pipeline kur, fit et, pipe.predict(X_test) → f1_score.
     """
-    pass
+    
+    results = {}
+    
+    for label, sw in [("with_stopwords", "english"), ("without_stopwords", None)]:
+        pipeline = Pipeline([
+            ("cv", CountVectorizer(stop_words=sw)),
+            ("nb", MultinomialNB())
+        ]).fit(X_train, y_train)
+        
+        y_pred = pipeline.predict(X_test)
+        f1 = f1_score(y_test, y_pred)
+        
+        results[label] = f1
+    
+    return results
 
 
 # 13. Toplu tahmin
@@ -295,7 +402,8 @@ def predict_batch(pipe, messages):
 
     İpucu: [predict_message(pipe, m) for m in messages]
     """
-    pass
+    
+    return [predict_message(pipe, message) for message in messages]
 
 
 # 14. Tüm pipeline'ı uçtan uca çalıştır
@@ -325,7 +433,48 @@ def run_pipeline():
             'sample_ham_pred': dict (predict_message çıktısı)
         }
     """
-    pass
+        
+    # 1. fetch_sms_data → load_sms_data
+    path = fetch_sms_data()
+    df = load_sms_data(path)
+    
+    # 2. explore_data (spam_rate al)
+    info = explore_data(df)
+    
+    # 3. encode_labels
+    df = encode_labels(df)
+    
+    # 4. split_data (X = df['message'], y = df['target'])
+    X_train, X_test, y_train, y_test = split_data(df["message"], df["target"])
+    
+    # 5. build_vectorizer_pipeline → train_model
+    pipeline = build_vectorizer_pipeline()
+    pipeline = train_model(pipeline, X_train, y_train)
+    
+    # 6. evaluate_model (test F1, recall)
+    metrics = evaluate_model(pipeline, X_test, y_test)
+    
+    # 7. top_spam_words (en spam kelime)
+    top_spams = top_spam_words(pipeline)
+    
+    # 8. predict_message ile iki örnek mesaj test et (biri spam, biri ham)
+    sample_spam = predict_message(
+        pipeline,
+        "WINNER!! You have won a FREE prize. Call now to claim your reward!",
+    )
+    sample_ham = predict_message(
+        pipeline,
+        "Hey, are we still meeting for lunch tomorrow?",
+    )
+    
+    return {
+        "spam_rate": info["spam_rate"],
+        "test_f1": metrics["f1"],
+        "test_recall": metrics["recall"],
+        "top_spam_word": top_spams[0],
+        "sample_spam_pred": sample_spam,
+        "sample_ham_pred": sample_ham
+    }
 
 
 if __name__ == "__main__":
